@@ -181,7 +181,14 @@ class STUNClient {
                         }
                         
                         // Move to next attribute (attributes are padded to 4 bytes)
-                        offset += 4 + ((attrLength + 3) & ~3)
+                        // Using the padding calculation from RFC 5389: 
+                        // The value in the length field MUST contain the length of the Value
+                        // part of the attribute, prior to padding, in bytes.  Since STUN
+                        // aligns attributes on 32-bit boundaries, attributes whose content
+                        // is not a multiple of 4 bytes are padded with 1, 2, or 3 bytes of
+                        // padding so that its value contains a multiple of 4 bytes.  The
+                        // padding bits are ignored, and may be any value.
+                        offset += 4 + (attrLength + 3 & ~0x03)
                     }
 
                     if (foundAddress && ip != null && port != -1) {
