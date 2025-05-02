@@ -23,7 +23,6 @@ class STUNClient {
     private val ATTR_MAPPED_ADDRESS = 0x0001
     
     // STUN magic cookie (fixed value in network byte order)
-    private val MAGIC_COOKIE = byteArrayOf(0x21.toByte(), 0x12.toByte(), 0xA4.toByte(), 0x42.toByte())
     private val MAGIC_COOKIE_INT = 0x2112A442
 
     data class STUNResponse(
@@ -55,6 +54,12 @@ class STUNClient {
                 transactionId[i] = (Math.random() * 256).toInt().toByte()
             }
 
+            // Convert magic cookie int to byte array
+            val magicCookieBytes = ByteBuffer.allocate(4)
+                .order(ByteOrder.BIG_ENDIAN)
+                .putInt(MAGIC_COOKIE_INT)
+                .array()
+
             // STUN binding request
             val request = ByteArray(20) // STUN header is 20 bytes
             // Message Type: Binding Request (0x0001)
@@ -64,7 +69,7 @@ class STUNClient {
             request[2] = 0x00.toByte()
             request[3] = 0x00.toByte()
             // Magic Cookie
-            System.arraycopy(MAGIC_COOKIE, 0, request, 4, 4)
+            System.arraycopy(magicCookieBytes, 0, request, 4, 4)
             // Transaction ID
             System.arraycopy(transactionId, 0, request, 8, 12)
 
@@ -136,7 +141,6 @@ class STUNClient {
                                 // XOR port with first 2 bytes of magic cookie
                                 val xorPort = ((response[offset + 6].toInt() and 0xFF) shl 8) or 
                                            (response[offset + 7].toInt() and 0xFF)
-                                val magicCookieBytes = ByteBuffer.allocate(4).putInt(MAGIC_COOKIE_INT).array()
                                 port = xorPort xor ((magicCookieBytes[0].toInt() and 0xFF) shl 8 or (magicCookieBytes[1].toInt() and 0xFF))
                                 
                                 // XOR address with magic cookie
