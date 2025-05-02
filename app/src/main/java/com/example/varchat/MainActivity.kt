@@ -26,15 +26,18 @@ import java.net.URL
 import java.net.HttpURLConnection
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.flow.collectLatest
 
 class MainActivity : ComponentActivity() {
     private val udpHolePunching = UDPHolePunching()
     private val stunClient = STUNClient()
+    private val signalingClient = SignalingClient()
     private val TAG = "MainActivity"
 
     // Combined log messages
@@ -67,6 +70,28 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+            
+            // Collect SignalingClient logs
+            launch {
+                signalingClient.logMessages.collect { messages ->
+                    val currentLogs = _combinedLogMessages.value
+                    val newMessages = messages.filter { !currentLogs.contains(it) }
+                    if (newMessages.isNotEmpty()) {
+                        _combinedLogMessages.value = (_combinedLogMessages.value + newMessages).takeLast(200)
+                    }
+                }
+            }
+            
+            // Listen for connection info from signaling server
+            launch {
+                signalingClient.connectionInfo.collectLatest { connectionInfo ->
+                    connectionInfo?.let {
+                        Log.d(TAG, "Received connection info: ${it.ip}:${it.port} for peer ${it.peerId}")
+                        // Start hole punching with the received connection info
+                        udpHolePunching.startHolePunching(it.ip, it.port)
+                    }
+                }
+            }
         }
 
         setContent {
@@ -75,7 +100,12 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    UDPHolePunchingDemo(udpHolePunching, stunClient, combinedLogMessages)
+                    SignalingUDPHolePunchingDemo(
+                        udpHolePunching = udpHolePunching, 
+                        stunClient = stunClient,
+                        signalingClient = signalingClient,
+                        combinedLogs = combinedLogMessages
+                    )
                 }
             }
         }
@@ -84,28 +114,43 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
         udpHolePunching.stop()
+        signalingClient.disconnect()
     }
 }
 
 @Composable
-fun UDPHolePunchingDemo(
+fun SignalingUDPHolePunchingDemo(
     udpHolePunching: UDPHolePunching, 
     stunClient: STUNClient,
+    signalingClient: SignalingClient,
     combinedLogs: StateFlow<List<String>>
 ) {
-    var remoteAddress by remember { mutableStateOf("") }
-    var remotePort by remember { mutableStateOf("") }
     var status by remember { mutableStateOf("Not started") }
     var publicIP by remember { mutableStateOf("") }
     var publicPort by remember { mutableStateOf("") }
     var showChat by remember { mutableStateOf(false) }
     var showLogs by remember { mutableStateOf(false) }
     var isLoading by remember { mutableStateOf(false) }
+    var selectedPeer by remember { mutableStateOf("") }
+    var isUsingSignaling by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val messages by udpHolePunching.messages.collectAsState()
     val logMessages by combinedLogs.collectAsState()
     val connectionStatus by udpHolePunching.connectionStatus.collectAsState()
+    val availablePeers by signalingClient.availablePeers.collectAsState()
+    var signalingConnected by remember { mutableStateOf(signalingClient.isConnected()) }
     val logListState = rememberLazyListState()
+
+    // Track signaling server connection state changes
+    LaunchedEffect(Unit) {
+        // Check connection status periodically
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            while (true) {
+                signalingConnected = signalingClient.isConnected()
+                kotlinx.coroutines.delay(1000) // Check every second
+            }
+        }
+    }
 
     // Auto-scroll to bottom of logs when new entries appear
     LaunchedEffect(logMessages.size) {
@@ -121,7 +166,11 @@ fun UDPHolePunchingDemo(
                 showChat = true
             }
             UDPHolePunching.ConnectionStatus.ATTEMPTING -> {
-                status = "Attempting connection to ${remoteAddress}:${remotePort}..."
+                status = if (isUsingSignaling) {
+                    "Attempting connection to peer..."
+                } else {
+                    "Attempting direct connection..."
+                }
                 // Optionally, auto-show logs when attempting connection
                 showLogs = true
             }
@@ -161,100 +210,235 @@ fun UDPHolePunchingDemo(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            Text("UDP Hole Punching Demo", style = MaterialTheme.typography.headlineMedium)
+            Text("UDP Hole Punching Demo with Signaling", style = MaterialTheme.typography.headlineMedium)
             
-            if (isLoading) {
-                CircularProgressIndicator()
-                Text("Attempting to get public address...", style = MaterialTheme.typography.bodyMedium)
-            } else {
+            // Connection method selector
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly
+            ) {
                 Button(
-                    onClick = {
-                        scope.launch {
-                            isLoading = true
-                            try {
-                                // Attempt STUN first
-                                val stunResponse = stunClient.getPublicAddress()
-                                if (stunResponse != null) {
-                                    publicIP = stunResponse.publicIP
-                                    publicPort = stunResponse.publicPort.toString()
-                                    status = "Got public address: $publicIP:$publicPort"
-                                    udpHolePunching.start()
-                                } else {
-                                    // STUN failed, try IP API fallback
-                                    val ipInfo = getPublicIPFallback()
-                                    if (ipInfo != null) {
-                                        publicIP = ipInfo.first
-                                        val localPort = udpHolePunching.getLocalPort()
-                                        publicPort = if (localPort > 0) localPort.toString() else ""
-                                        
-                                        if (publicIP.isNotEmpty()) {
-                                            status = "Got public IP: $publicIP, Port: $publicPort"
-                                            udpHolePunching.start()
-                                        } else {
-                                            status = "Failed to get public address"
+                    onClick = { isUsingSignaling = false },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (!isUsingSignaling) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Text("Direct Connection")
+                }
+                
+                Button(
+                    onClick = { isUsingSignaling = true },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (isUsingSignaling) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Text("Use Signaling Server")
+                }
+            }
+            
+            if (isUsingSignaling) {
+                // Signaling server connection UI
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            scope.launch {
+                                signalingClient.connect()
+                                // Start UDP socket to get local port
+                                udpHolePunching.start()
+                                // Get the local port and register it with the signaling server
+                                val localPort = udpHolePunching.getLocalPort()
+                                if (localPort > 0) {
+                                    signalingClient.registerUdpPort(localPort)
+                                    
+                                    // Get public address using the signaling server's STUN service
+                                    try {
+                                        val stunInfo = signalingClient.requestStunInfo(udpHolePunching.getSocket())
+                                        if (stunInfo != null) {
+                                            publicIP = stunInfo.first
+                                            publicPort = stunInfo.second.toString()
+                                            status = "Got public address from signaling STUN: $publicIP:$publicPort"
                                         }
-                                    } else {
-                                        status = "Failed to get public address"
+                                    } catch (e: Exception) {
+                                        Log.e(TAG, "Error getting STUN info from signaling server", e)
                                     }
                                 }
-                            } catch (e: Exception) {
-                                status = "Error: ${e.message}"
-                            } finally {
-                                isLoading = false
+                            }
+                        },
+                        enabled = !signalingConnected
+                    ) {
+                        Text("Connect to Signaling Server")
+                    }
+                    
+                    Spacer(modifier = Modifier.width(8.dp))
+                    
+                    Text(
+                        text = if (signalingConnected) {
+                            "Connected (ID: ${signalingClient.getMyPeerId() ?: "Unknown"})"
+                        } else {
+                            "Not connected"
+                        },
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+                
+                // Available peers list
+                Card(
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp)
+                    ) {
+                        Text("Available Peers", style = MaterialTheme.typography.titleMedium)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        
+                        if (availablePeers.isEmpty()) {
+                            Text("No peers available", style = MaterialTheme.typography.bodyMedium)
+                        } else {
+                            LazyColumn(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(120.dp)
+                            ) {
+                                items(availablePeers) { peer ->
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(4.dp)
+                                            .background(
+                                                if (selectedPeer == peer) 
+                                                    MaterialTheme.colorScheme.primaryContainer 
+                                                else 
+                                                    Color.Transparent
+                                            )
+                                            .clickable { selectedPeer = peer }
+                                            .padding(8.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = peer,
+                                            style = MaterialTheme.typography.bodyMedium
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
-                ) {
-                    Text("Get Public Address")
                 }
-            }
-
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(8.dp),
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text("Your Public Address", style = MaterialTheme.typography.titleMedium)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = if (publicIP.isNotEmpty() && publicPort.isNotEmpty()) {
-                            "$publicIP:$publicPort"
-                        } else {
-                            "Not available yet"
-                        },
-                        style = MaterialTheme.typography.bodyLarge
-                    )
-                }
-            }
-
-            OutlinedTextField(
-                value = remoteAddress,
-                onValueChange = { remoteAddress = it },
-                label = { Text("Friend's Public IP") },
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            OutlinedTextField(
-                value = remotePort,
-                onValueChange = { remotePort = it },
-                label = { Text("Friend's Public Port") },
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            Button(
-                onClick = {
-                    scope.launch {
-                        try {
-                            udpHolePunching.startHolePunching(remoteAddress, remotePort.toInt())
-                        } catch (e: Exception) {
-                            status = "Error: ${e.message}"
+                
+                Button(
+                    onClick = {
+                        if (selectedPeer.isNotEmpty()) {
+                            scope.launch {
+                                signalingClient.requestConnection(selectedPeer)
+                                status = "Requested connection to peer $selectedPeer"
+                            }
                         }
+                    },
+                    enabled = selectedPeer.isNotEmpty() && signalingConnected
+                ) {
+                    Text("Connect to Selected Peer")
+                }
+            } else {
+                // Direct connection UI (original layout)
+                if (isLoading) {
+                    CircularProgressIndicator()
+                    Text("Attempting to get public address...", style = MaterialTheme.typography.bodyMedium)
+                } else {
+                    Button(
+                        onClick = {
+                            scope.launch {
+                                isLoading = true
+                                try {
+                                    // Attempt STUN first
+                                    val stunResponse = stunClient.getPublicAddress()
+                                    if (stunResponse != null) {
+                                        publicIP = stunResponse.publicIP
+                                        publicPort = stunResponse.publicPort.toString()
+                                        status = "Got public address: $publicIP:$publicPort"
+                                        udpHolePunching.start()
+                                    } else {
+                                        // STUN failed, try IP API fallback
+                                        val ipInfo = getPublicIPFallback()
+                                        if (ipInfo != null) {
+                                            publicIP = ipInfo.first
+                                            val localPort = udpHolePunching.getLocalPort()
+                                            publicPort = if (localPort > 0) localPort.toString() else ""
+                                            
+                                            if (publicIP.isNotEmpty()) {
+                                                status = "Got public IP: $publicIP, Port: $publicPort"
+                                                udpHolePunching.start()
+                                            } else {
+                                                status = "Failed to get public address"
+                                            }
+                                        } else {
+                                            status = "Failed to get public address"
+                                        }
+                                    }
+                                } catch (e: Exception) {
+                                    status = "Error: ${e.message}"
+                                } finally {
+                                    isLoading = false
+                                }
+                            }
+                        }
+                    ) {
+                        Text("Get Public Address")
                     }
-                },
-                enabled = publicIP.isNotEmpty() && publicPort.isNotEmpty() && remoteAddress.isNotEmpty() && remotePort.isNotEmpty()
-            ) {
-                Text("Start Hole Punching")
+                }
+
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(8.dp),
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("Your Public Address", style = MaterialTheme.typography.titleMedium)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = if (publicIP.isNotEmpty() && publicPort.isNotEmpty()) {
+                                "$publicIP:$publicPort"
+                            } else {
+                                "Not available yet"
+                            },
+                            style = MaterialTheme.typography.bodyLarge
+                        )
+                    }
+                }
+
+                var remoteAddress by remember { mutableStateOf("") }
+                var remotePort by remember { mutableStateOf("") }
+
+                OutlinedTextField(
+                    value = remoteAddress,
+                    onValueChange = { remoteAddress = it },
+                    label = { Text("Friend's Public IP") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
+                    value = remotePort,
+                    onValueChange = { remotePort = it },
+                    label = { Text("Friend's Public Port") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Button(
+                    onClick = {
+                        scope.launch {
+                            try {
+                                udpHolePunching.startHolePunching(remoteAddress, remotePort.toInt())
+                            } catch (e: Exception) {
+                                status = "Error: ${e.message}"
+                            }
+                        }
+                    },
+                    enabled = publicIP.isNotEmpty() && publicPort.isNotEmpty() && remoteAddress.isNotEmpty() && remotePort.isNotEmpty()
+                ) {
+                    Text("Start Hole Punching")
+                }
             }
 
             Card(
@@ -302,7 +486,7 @@ fun UDPHolePunchingDemo(
                             .fillMaxSize()
                             .padding(8.dp)
                     ) {
-                        Text("Hole Punching Logs", style = MaterialTheme.typography.titleMedium)
+                        Text("Connection Logs", style = MaterialTheme.typography.titleMedium)
                         
                         Spacer(modifier = Modifier.height(8.dp))
                         
@@ -317,9 +501,11 @@ fun UDPHolePunchingDemo(
                         ) {
                             items(logMessages) { logMessage ->
                                 val isStunLog = logMessage.contains("STUN")
+                                val isSignalLog = logMessage.contains("SIGNAL")
                                 val isHolePunchLog = logMessage.contains("hole punch", ignoreCase = true)
                                 val textColor = when {
                                     isStunLog -> Color(0xFF2196F3) // Blue for STUN
+                                    isSignalLog -> Color(0xFF00BCD4) // Cyan for signaling
                                     isHolePunchLog -> Color(0xFF9C27B0) // Purple for hole punching
                                     logMessage.contains("ERROR", ignoreCase = true) -> Color(0xFFF44336) // Red for errors
                                     logMessage.contains("Connected successfully") -> Color(0xFF4CAF50) // Green for success
@@ -486,9 +672,11 @@ fun ChatScreen(
                     ) {
                         items(logMessages) { logMessage ->
                             val isStunLog = logMessage.contains("STUN")
+                            val isSignalLog = logMessage.contains("SIGNAL")
                             val isHolePunchLog = logMessage.contains("hole punch", ignoreCase = true)
                             val textColor = when {
                                 isStunLog -> Color(0xFF2196F3) // Blue for STUN
+                                isSignalLog -> Color(0xFF00BCD4) // Cyan for signaling
                                 isHolePunchLog -> Color(0xFF9C27B0) // Purple for hole punching
                                 logMessage.contains("ERROR", ignoreCase = true) -> Color(0xFFF44336) // Red for errors
                                 logMessage.contains("Connected successfully") -> Color(0xFF4CAF50) // Green for success

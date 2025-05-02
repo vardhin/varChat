@@ -1,0 +1,28 @@
+{
+  "name": "signaling-server",
+  "version": "1.0.0",
+  "description": "UDP hole punching signaling server for P2P connections",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "client": "node client-improved.js",
+    "client:basic": "node client.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "udp",
+    "hole-punching",
+    "p2p",
+    "signaling",
+    "webrtc",
+    "nat-traversal"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "dgram": "^1.0.1",
+    "express": "^4.18.2",
+    "uuid": "^9.0.1",
+    "ws": "^8.14.2"
+  }
+}

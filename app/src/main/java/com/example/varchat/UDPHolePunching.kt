@@ -326,6 +326,14 @@ class UDPHolePunching(private val localPort: Int = 0) {
         return socket?.localPort ?: -1
     }
 
+    // Add method to get access to the socket
+    fun getSocket(): DatagramSocket {
+        if (socket == null) {
+            throw IllegalStateException("Socket not initialized. Call start() first.")
+        }
+        return socket!!
+    }
+
     fun stop() {
         isListening.set(false)
         isConnected.set(false)
