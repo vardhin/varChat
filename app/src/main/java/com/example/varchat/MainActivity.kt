@@ -192,7 +192,7 @@ fun ChatScreen(
 
 @Composable
 fun MessageBubble(message: String, isLocal: Boolean) {
-    val alignment = if (isLocal) Alignment.End else Alignment.Start
+    val alignment = if (isLocal) Alignment.CenterEnd else Alignment.CenterStart
     val color = if (isLocal) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary
     
     Box(
