@@ -13,6 +13,7 @@ import java.net.SocketTimeoutException
 class STUNClient {
     private val TAG = "STUNClient"
     private val STUN_SERVERS = listOf(
+        "stun.l.google.com:19302",  // Primary Google STUN
         "stun1.l.google.com:19302",
         "stun2.l.google.com:19302",
         "stun3.l.google.com:19302",
@@ -22,6 +23,12 @@ class STUNClient {
     // STUN attribute types (defined in RFC 5389)
     private val ATTR_XOR_MAPPED_ADDRESS = 0x0020
     private val ATTR_MAPPED_ADDRESS = 0x0001
+    // Adding other common attribute types for better debugging
+    private val ATTR_SOFTWARE = 0x8022
+    private val ATTR_FINGERPRINT = 0x8028
+    private val ATTR_ERROR_CODE = 0x0009
+    private val ATTR_UNKNOWN_ATTRIBUTES = 0x000A
+    private val ATTR_ALTERNATE_SERVER = 0x8023
     
     // STUN magic cookie (fixed value in network byte order)
     private val MAGIC_COOKIE_INT = 0x2112A442
@@ -38,6 +45,19 @@ class STUNClient {
             if ((i + 1) % 16 == 0) sb.append("\n")
         }
         return sb.toString()
+    }
+
+    private fun getAttributeName(type: Int): String {
+        return when (type) {
+            ATTR_MAPPED_ADDRESS -> "MAPPED-ADDRESS"
+            ATTR_XOR_MAPPED_ADDRESS -> "XOR-MAPPED-ADDRESS"
+            ATTR_SOFTWARE -> "SOFTWARE"
+            ATTR_FINGERPRINT -> "FINGERPRINT"
+            ATTR_ERROR_CODE -> "ERROR-CODE"
+            ATTR_UNKNOWN_ATTRIBUTES -> "UNKNOWN-ATTRIBUTES"
+            ATTR_ALTERNATE_SERVER -> "ALTERNATE-SERVER"
+            else -> "UNKNOWN-TYPE-0x${Integer.toHexString(type)}"
+        }
     }
 
     suspend fun getPublicAddress(): STUNResponse? = withContext(Dispatchers.IO) {
@@ -88,6 +108,7 @@ class STUNClient {
                 System.arraycopy(transactionId, 0, request, 8, 12)
                 
                 Log.d(TAG, "STUN request prepared with transaction ID: ${dumpHex(transactionId, transactionId.size)}")
+                Log.d(TAG, "Magic cookie (hex): ${dumpHex(magicCookieBytes, magicCookieBytes.size)}")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to prepare STUN request: ${e.message}")
                 e.printStackTrace()
@@ -144,13 +165,16 @@ class STUNClient {
                     try {
                         // Check if it's a valid STUN response (first 2 bits should be 00)
                         if ((response[0].toInt() and 0xC0) != 0) {
-                            Log.e(TAG, "Not a valid STUN response from $server, invalid first 2 bits")
+                            Log.e(TAG, "Not a valid STUN response from $server, invalid first 2 bits: ${response[0].toInt() and 0xC0}")
                             continue
                         }
 
                         // Check if it's a Binding Response (0x0101)
-                        if (response[0].toInt() != 0x01 || response[1].toInt() != 0x01) {
-                            Log.e(TAG, "Not a Binding Response from $server: ${response[0]}, ${response[1]}")
+                        val messageType = ((response[0].toInt() and 0xFF) shl 8) or (response[1].toInt() and 0xFF)
+                        Log.d(TAG, "Message type: 0x${Integer.toHexString(messageType)}")
+                        
+                        if (messageType != 0x0101) {
+                            Log.e(TAG, "Not a Binding Response from $server: 0x${Integer.toHexString(messageType)}")
                             continue
                         }
 
@@ -158,23 +182,48 @@ class STUNClient {
                         val messageLength = ((response[2].toInt() and 0xFF) shl 8) or (response[3].toInt() and 0xFF)
                         Log.d(TAG, "STUN message length: $messageLength bytes")
                         
+                        // Verify the magic cookie
+                        val responseCookie = ByteArray(4)
+                        System.arraycopy(response, 4, responseCookie, 0, 4)
+                        Log.d(TAG, "Response cookie: ${dumpHex(responseCookie, 4)}")
+                        
+                        var cookieMatch = true
+                        for (i in 0 until 4) {
+                            if (responseCookie[i] != magicCookieBytes[i]) {
+                                Log.e(TAG, "Magic cookie mismatch at position $i")
+                                cookieMatch = false
+                                break
+                            }
+                        }
+                        
+                        if (!cookieMatch) {
+                            Log.e(TAG, "Magic cookie mismatch in response from $server")
+                            continue
+                        }
+                        
                         // Verify the transaction ID
+                        val responseTransactionId = ByteArray(12)
+                        System.arraycopy(response, 8, responseTransactionId, 0, 12)
+                        Log.d(TAG, "Response transaction ID: ${dumpHex(responseTransactionId, 12)}")
+                        
                         var idMatch = true
                         for (i in 0 until 12) {
-                            if (response[i + 8] != request[i + 8]) {
+                            if (responseTransactionId[i] != transactionId[i]) {
                                 Log.e(TAG, "Transaction ID mismatch at position $i")
                                 idMatch = false
                                 break
                             }
                         }
+                        
                         if (!idMatch) {
                             Log.e(TAG, "Transaction ID mismatch in response from $server")
                             continue
                         }
                         
-                        Log.d(TAG, "Transaction ID in response matches request")
+                        Log.d(TAG, "Transaction ID and magic cookie in response match request")
                     } catch (e: Exception) {
                         Log.e(TAG, "Error validating STUN response from $server: ${e.message}")
+                        e.printStackTrace()
                         continue
                     }
 
@@ -185,37 +234,78 @@ class STUNClient {
                         var ip: String? = null
                         var port: Int = -1
                         val messageLength = ((response[2].toInt() and 0xFF) shl 8) or (response[3].toInt() and 0xFF)
+                        val endOffset = 20 + messageLength
+                        
+                        Log.d(TAG, "Starting attribute parsing from offset 20 to $endOffset")
 
-                        while (offset < 20 + messageLength) {
+                        while (offset < endOffset) {
+                            if (offset + 4 > response.size) {
+                                Log.e(TAG, "Response buffer overrun when reading attribute header at offset $offset")
+                                break
+                            }
+                            
                             // Get attribute type and length
                             val attrType = ((response[offset].toInt() and 0xFF) shl 8) or (response[offset + 1].toInt() and 0xFF)
                             val attrLength = ((response[offset + 2].toInt() and 0xFF) shl 8) or (response[offset + 3].toInt() and 0xFF)
                             
-                            Log.d(TAG, "Attribute type: 0x${Integer.toHexString(attrType)}, length: $attrLength at offset $offset")
+                            val attrName = getAttributeName(attrType)
+                            Log.d(TAG, "Found attribute: $attrName (0x${Integer.toHexString(attrType)}), length: $attrLength at offset $offset")
+                            
+                            if (offset + 4 + attrLength > response.size) {
+                                Log.e(TAG, "Response buffer overrun when reading attribute value at offset $offset")
+                                break
+                            }
 
                             if (attrType == ATTR_XOR_MAPPED_ADDRESS) {
-                                Log.d(TAG, "Found XOR-MAPPED-ADDRESS attribute")
+                                Log.d(TAG, "Processing XOR-MAPPED-ADDRESS attribute")
                                 
                                 try {
+                                    // Dump the entire attribute for debugging
+                                    val attrBytes = ByteArray(attrLength)
+                                    System.arraycopy(response, offset + 4, attrBytes, 0, attrLength)
+                                    Log.d(TAG, "XOR-MAPPED-ADDRESS bytes: ${dumpHex(attrBytes, attrLength)}")
+                                    
+                                    if (attrLength < 4) {
+                                        Log.e(TAG, "XOR-MAPPED-ADDRESS attribute too short: $attrLength bytes")
+                                        break
+                                    }
+                                    
                                     // Skip the reserved byte
                                     val family = response[offset + 5].toInt() and 0xFF
+                                    Log.d(TAG, "Address family: $family (1=IPv4, 2=IPv6)")
                                     
                                     if (family == 0x01) { // IPv4
+                                        if (attrLength < 8) {
+                                            Log.e(TAG, "IPv4 XOR-MAPPED-ADDRESS attribute too short: $attrLength bytes")
+                                            break
+                                        }
+                                        
                                         // XOR port with first 2 bytes of magic cookie
                                         val xorPort = ((response[offset + 6].toInt() and 0xFF) shl 8) or 
                                                   (response[offset + 7].toInt() and 0xFF)
+                                        Log.d(TAG, "XOR'd port value: $xorPort")
+                                        
                                         port = xorPort xor ((magicCookieBytes[0].toInt() and 0xFF) shl 8 or (magicCookieBytes[1].toInt() and 0xFF))
+                                        Log.d(TAG, "Decoded port: $port")
                                         
                                         // XOR address with magic cookie
                                         val xorAddress = ByteArray(4)
                                         for (i in 0 until 4) {
                                             xorAddress[i] = (response[offset + 8 + i].toInt() xor magicCookieBytes[i].toInt()).toByte()
                                         }
+                                        
+                                        // Dump the XOR'd address for debugging
+                                        Log.d(TAG, "XOR'd address bytes: ${dumpHex(ByteArray(4).apply {
+                                            System.arraycopy(response, offset + 8, this, 0, 4)
+                                        }, 4)}")
+                                        Log.d(TAG, "Decoded address bytes: ${dumpHex(xorAddress, 4)}")
+                                        
                                         ip = InetAddress.getByAddress(xorAddress).hostAddress
                                         Log.d(TAG, "Decoded XOR-MAPPED-ADDRESS: $ip:$port")
                                         foundAddress = true
                                         serverSuccess = true
-                                        break
+                                        
+                                        // Don't break here, continue parsing to see all attributes
                                     } else if (family == 0x02) { // IPv6
                                         Log.d(TAG, "IPv6 address found (not supported in this implementation)")
                                     } else {
@@ -226,16 +316,38 @@ class STUNClient {
                                     e.printStackTrace()
                                 }
                             } else if (attrType == ATTR_MAPPED_ADDRESS && !foundAddress) {
-                                Log.d(TAG, "Found MAPPED-ADDRESS attribute")
+                                Log.d(TAG, "Processing MAPPED-ADDRESS attribute")
                                 
                                 try {
+                                    // Dump the entire attribute for debugging
+                                    val attrBytes = ByteArray(attrLength)
+                                    System.arraycopy(response, offset + 4, attrBytes, 0, attrLength)
+                                    Log.d(TAG, "MAPPED-ADDRESS bytes: ${dumpHex(attrBytes, attrLength)}")
+                                    
+                                    if (attrLength < 4) {
+                                        Log.e(TAG, "MAPPED-ADDRESS attribute too short: $attrLength bytes")
+                                        break
+                                    }
+                                    
                                     // Skip the reserved byte
                                     val family = response[offset + 5].toInt() and 0xFF
+                                    Log.d(TAG, "Address family: $family (1=IPv4, 2=IPv6)")
                                     
                                     if (family == 0x01) { // IPv4
+                                        if (attrLength < 8) {
+                                            Log.e(TAG, "IPv4 MAPPED-ADDRESS attribute too short: $attrLength bytes")
+                                            break
+                                        }
+                                        
                                         port = ((response[offset + 6].toInt() and 0xFF) shl 8) or (response[offset + 7].toInt() and 0xFF)
+                                        Log.d(TAG, "Decoded port: $port")
+                                        
                                         val ipBytes = ByteArray(4)
                                         System.arraycopy(response, offset + 8, ipBytes, 0, 4)
+                                        
+                                        // Dump the address bytes for debugging
+                                        Log.d(TAG, "Address bytes: ${dumpHex(ipBytes, 4)}")
+                                        
                                         ip = InetAddress.getByAddress(ipBytes).hostAddress
                                         Log.d(TAG, "Decoded MAPPED-ADDRESS: $ip:$port")
                                         foundAddress = true
@@ -250,14 +362,40 @@ class STUNClient {
                                     Log.e(TAG, "Error parsing MAPPED-ADDRESS: ${e.message}")
                                     e.printStackTrace()
                                 }
+                            } else if (attrType == ATTR_SOFTWARE) {
+                                try {
+                                    val softwareBytes = ByteArray(attrLength)
+                                    System.arraycopy(response, offset + 4, softwareBytes, 0, attrLength)
+                                    val software = String(softwareBytes)
+                                    Log.d(TAG, "SERVER SOFTWARE: $software")
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "Error parsing SOFTWARE attribute: ${e.message}")
+                                }
+                            } else if (attrType == ATTR_ERROR_CODE) {
+                                try {
+                                    if (attrLength >= 4) {
+                                        val errorClass = response[offset + 6].toInt() and 0x07
+                                        val errorNumber = response[offset + 7].toInt() and 0xFF
+                                        val errorCode = errorClass * 100 + errorNumber
+                                        
+                                        val reasonBytes = ByteArray(attrLength - 4)
+                                        System.arraycopy(response, offset + 8, reasonBytes, 0, attrLength - 4)
+                                        val reason = String(reasonBytes)
+                                        
+                                        Log.e(TAG, "STUN ERROR: $errorCode - $reason")
+                                    }
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "Error parsing ERROR-CODE attribute: ${e.message}")
+                                }
                             } else {
-                                Log.d(TAG, "Skipping attribute type: 0x${Integer.toHexString(attrType)}")
+                                Log.d(TAG, "Skipping attribute type: ${getAttributeName(attrType)}")
                             }
                             
                             // Move to next attribute (attributes are padded to 4 bytes)
                             try {
-                                val paddedLength = (attrLength + 3) and (-4); // Round up to multiple of 4
-                                offset += 4 + paddedLength;
+                                val paddedLength = (attrLength + 3) and (-4) // Round up to multiple of 4
+                                offset += 4 + paddedLength
+                                Log.d(TAG, "Moving to next attribute at offset $offset")
                             } catch (e: Exception) {
                                 Log.e(TAG, "Error calculating next attribute offset: ${e.message}")
                                 break
@@ -268,7 +406,7 @@ class STUNClient {
                             Log.d(TAG, "Successfully obtained public address from $server: $ip:$port")
                             return@withContext STUNResponse(ip, port)
                         } else {
-                            Log.e(TAG, "Could not find address in STUN response from $server")
+                            Log.e(TAG, "Could not find address in STUN response from $server (found address: $foundAddress, ip: $ip, port: $port)")
                         }
                     } catch (e: Exception) {
                         Log.e(TAG, "Error parsing STUN attributes from $server: ${e.message}")
