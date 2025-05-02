@@ -91,7 +91,7 @@ class UDPHolePunching(private val localPort: Int = 0) {
                     try {
                         socket?.receive(packet)
                         val message = String(packet.data, 0, packet.length)
-                        addLogMessage("Received packet from ${packet.address}:${packet.port}, length: ${packet.length}")
+                        addLogMessage("Received packet from ${packet.address}:${packet.port}, length: ${packet.length}, content: '$message'")
                         
                         if (!isConnected.get()) {
                             // First message received, establish connection
@@ -105,25 +105,29 @@ class UDPHolePunching(private val localPort: Int = 0) {
                             startKeepAliveThread()
                         }
                         
-                        if (message != "HOLE_PUNCH" && message != "KEEP_ALIVE") {
-                            _messages.value = _messages.value + ChatMessage(
-                                text = message,
-                                isLocal = false
-                            )
-                            addLogMessage("Added message to chat: $message")
-                        } else if (message == "HOLE_PUNCH") {
-                            addLogMessage("Received hole punching packet")
-                            // Send a reply to keep the hole open
-                            try {
-                                val replyPacket = DatagramPacket("HOLE_PUNCH".toByteArray(), "HOLE_PUNCH".length, packet.address, packet.port)
-                                socket?.send(replyPacket)
-                                addLogMessage("Sent hole punch reply")
-                            } catch (e: Exception) {
-                                addLogMessage("Failed to send hole punch reply: ${e.message}")
+                        when (message) {
+                            "HOLE_PUNCH" -> {
+                                addLogMessage("Received hole punching packet")
+                                // Send a reply to keep the hole open
+                                try {
+                                    val replyPacket = DatagramPacket("HOLE_PUNCH".toByteArray(), "HOLE_PUNCH".length, packet.address, packet.port)
+                                    socket?.send(replyPacket)
+                                    addLogMessage("Sent hole punch reply")
+                                } catch (e: Exception) {
+                                    addLogMessage("Failed to send hole punch reply: ${e.message}")
+                                }
                             }
-                        } else if (message == "KEEP_ALIVE") {
-                            addLogMessage("Received keep-alive packet")
-                            // No need to respond to keep-alive packets
+                            "KEEP_ALIVE" -> {
+                                addLogMessage("Received keep-alive packet")
+                                // No need to respond to keep-alive packets
+                            }
+                            else -> {
+                                _messages.value = _messages.value + ChatMessage(
+                                    text = message,
+                                    isLocal = false
+                                )
+                                addLogMessage("Added message to chat: $message")
+                            }
                         }
                     } catch (e: Exception) {
                         if (isListening.get()) {
