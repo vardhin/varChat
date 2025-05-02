@@ -48,10 +48,18 @@ class STUNClient {
 
                     // Parse STUN response
                     if (response[0] == 0x01.toByte() && response[1] == 0x01.toByte()) { // Binding Response
-                        val publicIP = responsePacket.address.hostAddress
-                        val publicPort = responsePacket.port
-                        Log.d(TAG, "STUN Response - Public IP: $publicIP, Public Port: $publicPort")
-                        return@withContext STUNResponse(publicIP, publicPort)
+                        // Get the port from the XOR-MAPPED-ADDRESS attribute
+                        val portOffset = 20 // Skip STUN header
+                        val port = ((response[portOffset + 2].toInt() and 0xFF) shl 8) or 
+                                 (response[portOffset + 3].toInt() and 0xFF)
+                        
+                        // Get the IP from the XOR-MAPPED-ADDRESS attribute
+                        val ipBytes = ByteArray(4)
+                        System.arraycopy(response, portOffset + 4, ipBytes, 0, 4)
+                        val ip = InetAddress.getByAddress(ipBytes).hostAddress
+
+                        Log.d(TAG, "STUN Response - Public IP: $ip, Public Port: $port")
+                        return@withContext STUNResponse(ip, port)
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Error with STUN server $server: ${e.message}")
