@@ -7,10 +7,12 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import com.example.varchat.ui.theme.VarChatTheme
@@ -59,16 +61,38 @@ fun UDPHolePunchingDemo(udpHolePunching: UDPHolePunching, stunClient: STUNClient
     var isLoading by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val messages by udpHolePunching.messages.collectAsState()
+    val connectionStatus by udpHolePunching.connectionStatus.collectAsState()
+
+    LaunchedEffect(connectionStatus) {
+        when (connectionStatus) {
+            UDPHolePunching.ConnectionStatus.CONNECTED -> {
+                status = "Connected successfully!"
+                showChat = true
+            }
+            UDPHolePunching.ConnectionStatus.ATTEMPTING -> {
+                status = "Attempting connection to ${remoteAddress}:${remotePort}..."
+            }
+            UDPHolePunching.ConnectionStatus.FAILED -> {
+                status = "Connection failed! Please try again."
+            }
+            UDPHolePunching.ConnectionStatus.NOT_CONNECTED -> {
+                status = "Not connected"
+            }
+        }
+    }
 
     if (showChat) {
         ChatScreen(
             messages = messages,
+            connectionStatus = connectionStatus,
             onSendMessage = { message ->
                 scope.launch {
                     udpHolePunching.sendMessage(message)
                 }
             },
-            onBack = { showChat = false }
+            onBack = { 
+                showChat = false 
+            }
         )
     } else {
         Column(
@@ -94,7 +118,7 @@ fun UDPHolePunchingDemo(udpHolePunching: UDPHolePunching, stunClient: STUNClient
                                 if (stunResponse != null) {
                                     publicIP = stunResponse.publicIP
                                     publicPort = stunResponse.publicPort.toString()
-                                    status = "Public IP: $publicIP, Public Port: $publicPort"
+                                    status = "Got public address: $publicIP:$publicPort"
                                     udpHolePunching.start()
                                 } else {
                                     // STUN failed, try IP API fallback
@@ -105,7 +129,7 @@ fun UDPHolePunchingDemo(udpHolePunching: UDPHolePunching, stunClient: STUNClient
                                         publicPort = if (localPort > 0) localPort.toString() else ""
                                         
                                         if (publicIP.isNotEmpty()) {
-                                            status = "Got public IP (API): $publicIP, Using local port: $publicPort"
+                                            status = "Got public IP: $publicIP, Port: $publicPort"
                                             udpHolePunching.start()
                                         } else {
                                             status = "Failed to get public address"
@@ -126,7 +150,24 @@ fun UDPHolePunchingDemo(udpHolePunching: UDPHolePunching, stunClient: STUNClient
                 }
             }
 
-            Text("Your Public Address: $publicIP:$publicPort")
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(8.dp),
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("Your Public Address", style = MaterialTheme.typography.titleMedium)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = if (publicIP.isNotEmpty() && publicPort.isNotEmpty()) {
+                            "$publicIP:$publicPort"
+                        } else {
+                            "Not available yet"
+                        },
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                }
+            }
 
             OutlinedTextField(
                 value = remoteAddress,
@@ -147,8 +188,6 @@ fun UDPHolePunchingDemo(udpHolePunching: UDPHolePunching, stunClient: STUNClient
                     scope.launch {
                         try {
                             udpHolePunching.startHolePunching(remoteAddress, remotePort.toInt())
-                            status = "Starting hole punching..."
-                            showChat = true
                         } catch (e: Exception) {
                             status = "Error: ${e.message}"
                         }
@@ -159,7 +198,28 @@ fun UDPHolePunchingDemo(udpHolePunching: UDPHolePunching, stunClient: STUNClient
                 Text("Start Hole Punching")
             }
 
-            Text(status, style = MaterialTheme.typography.bodyMedium)
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = when (connectionStatus) {
+                        UDPHolePunching.ConnectionStatus.CONNECTED -> Color(0xFF4CAF50)
+                        UDPHolePunching.ConnectionStatus.ATTEMPTING -> Color(0xFFFFA000)
+                        UDPHolePunching.ConnectionStatus.FAILED -> Color(0xFFF44336)
+                        UDPHolePunching.ConnectionStatus.NOT_CONNECTED -> MaterialTheme.colorScheme.surfaceVariant
+                    }
+                )
+            ) {
+                Text(
+                    text = status,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (connectionStatus != UDPHolePunching.ConnectionStatus.NOT_CONNECTED) {
+                        Color.White
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    modifier = Modifier.padding(16.dp)
+                )
+            }
         }
     }
 }
@@ -208,10 +268,19 @@ suspend fun getPublicIPFallback(): Pair<String, String>? = withContext(Dispatche
 @Composable
 fun ChatScreen(
     messages: List<UDPHolePunching.ChatMessage>,
+    connectionStatus: UDPHolePunching.ConnectionStatus,
     onSendMessage: (String) -> Unit,
     onBack: () -> Unit
 ) {
     var message by remember { mutableStateOf("") }
+    val listState = rememberLazyListState()
+    
+    // Scroll to bottom when new messages arrive
+    LaunchedEffect(messages.size) {
+        if (messages.isNotEmpty()) {
+            listState.animateScrollToItem(messages.size - 1)
+        }
+    }
     
     Column(
         modifier = Modifier
@@ -224,23 +293,75 @@ fun ChatScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text("Chat", style = MaterialTheme.typography.headlineMedium)
+            
+            // Connection status indicator
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(12.dp)
+                        .padding(end = 4.dp)
+                        .align(Alignment.CenterVertically),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Surface(
+                        modifier = Modifier.size(12.dp),
+                        shape = MaterialTheme.shapes.small,
+                        color = when (connectionStatus) {
+                            UDPHolePunching.ConnectionStatus.CONNECTED -> Color(0xFF4CAF50)
+                            UDPHolePunching.ConnectionStatus.ATTEMPTING -> Color(0xFFFFA000)
+                            UDPHolePunching.ConnectionStatus.FAILED -> Color(0xFFF44336)
+                            UDPHolePunching.ConnectionStatus.NOT_CONNECTED -> Color.Gray
+                        }
+                    ) {}
+                }
+                
+                Text(
+                    text = when (connectionStatus) {
+                        UDPHolePunching.ConnectionStatus.CONNECTED -> "Connected"
+                        UDPHolePunching.ConnectionStatus.ATTEMPTING -> "Connecting..."
+                        UDPHolePunching.ConnectionStatus.FAILED -> "Failed"
+                        UDPHolePunching.ConnectionStatus.NOT_CONNECTED -> "Disconnected"
+                    },
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+            
             Button(onClick = onBack) {
                 Text("Back")
             }
         }
 
-        LazyColumn(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .padding(vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            items(messages) { message ->
-                MessageBubble(
-                    message = message.text,
-                    isLocal = message.isLocal
-                )
+        if (messages.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = when (connectionStatus) {
+                            UDPHolePunching.ConnectionStatus.CONNECTED -> "Connected! Start chatting."
+                            UDPHolePunching.ConnectionStatus.ATTEMPTING -> "Establishing connection..."
+                            UDPHolePunching.ConnectionStatus.FAILED -> "Connection failed. Go back and try again."
+                            UDPHolePunching.ConnectionStatus.NOT_CONNECTED -> "Not connected."
+                        },
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                }
+            }
+        } else {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(messages) { message ->
+                    MessageBubble(message = message)
+                }
             }
         }
 
@@ -252,7 +373,9 @@ fun ChatScreen(
                 value = message,
                 onValueChange = { message = it },
                 modifier = Modifier.weight(1f),
-                placeholder = { Text("Type a message...") }
+                placeholder = { Text("Type a message...") },
+                enabled = connectionStatus == UDPHolePunching.ConnectionStatus.CONNECTED,
+                singleLine = true
             )
             Button(
                 onClick = {
@@ -261,7 +384,8 @@ fun ChatScreen(
                         message = ""
                     }
                 },
-                modifier = Modifier.padding(start = 8.dp)
+                modifier = Modifier.padding(start = 8.dp),
+                enabled = message.isNotBlank() && connectionStatus == UDPHolePunching.ConnectionStatus.CONNECTED
             ) {
                 Text("Send")
             }
@@ -270,24 +394,43 @@ fun ChatScreen(
 }
 
 @Composable
-fun MessageBubble(message: String, isLocal: Boolean) {
-    val alignment = if (isLocal) Alignment.CenterEnd else Alignment.CenterStart
-    val color = if (isLocal) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary
+fun MessageBubble(message: UDPHolePunching.ChatMessage) {
+    val isLocal = message.isLocal
+    val alignment = if (isLocal) Alignment.End else Alignment.Start
+    val backgroundColor = if (isLocal) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary
+    val textColor = MaterialTheme.colorScheme.onPrimary
     
-    Box(
+    Column(
         modifier = Modifier.fillMaxWidth(),
-        contentAlignment = alignment
+        horizontalAlignment = alignment
     ) {
         Surface(
-            color = color,
+            color = backgroundColor,
             shape = MaterialTheme.shapes.medium,
-            modifier = Modifier.padding(horizontal = 8.dp)
+            modifier = Modifier.padding(vertical = 2.dp, horizontal = 8.dp)
         ) {
-            Text(
-                text = message,
-                modifier = Modifier.padding(8.dp),
-                color = MaterialTheme.colorScheme.onPrimary
-            )
+            Column(modifier = Modifier.padding(8.dp)) {
+                Text(
+                    text = message.text,
+                    color = textColor
+                )
+            }
         }
+        
+        Text(
+            text = formatTimestamp(message.timestamp),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)
+        )
     }
+}
+
+fun formatTimestamp(timestamp: Long): String {
+    val calendar = java.util.Calendar.getInstance()
+    calendar.timeInMillis = timestamp
+    
+    val hours = calendar.get(java.util.Calendar.HOUR_OF_DAY)
+    val minutes = calendar.get(java.util.Calendar.MINUTE)
+    return String.format("%02d:%02d", hours, minutes)
 }

@@ -16,9 +16,20 @@ class UDPHolePunching(private val localPort: Int = 0) {
     private var remoteAddress: InetAddress? = null
     private var remotePort: Int = 0
     private var isListening = false
+    private var connectionAttemptThread: Thread? = null
 
     private val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
     val messages: StateFlow<List<ChatMessage>> = _messages
+    
+    private val _connectionStatus = MutableStateFlow<ConnectionStatus>(ConnectionStatus.NOT_CONNECTED)
+    val connectionStatus: StateFlow<ConnectionStatus> = _connectionStatus
+
+    enum class ConnectionStatus {
+        NOT_CONNECTED,
+        ATTEMPTING,
+        CONNECTED,
+        FAILED
+    }
 
     data class ChatMessage(
         val text: String,
@@ -65,6 +76,7 @@ class UDPHolePunching(private val localPort: Int = 0) {
                             remoteAddress = packet.address
                             remotePort = packet.port
                             isConnected = true
+                            _connectionStatus.value = ConnectionStatus.CONNECTED
                             Log.d(TAG, "Connection established with ${packet.address}:${packet.port}")
                         }
                         
@@ -108,10 +120,16 @@ class UDPHolePunching(private val localPort: Int = 0) {
                 start()
             }
             
+            // Reset state if retrying
+            if (connectionStatus.value == ConnectionStatus.FAILED || connectionStatus.value == ConnectionStatus.CONNECTED) {
+                isConnected = false
+            }
+            
             this@UDPHolePunching.remoteAddress = InetAddress.getByName(remoteIP)
             this@UDPHolePunching.remotePort = remotePort
             
             Log.d(TAG, "Starting hole punching to $remoteIP:$remotePort")
+            _connectionStatus.value = ConnectionStatus.ATTEMPTING
             
             // Send initial packet to create NAT mapping
             val initialPacket = "HOLE_PUNCH".toByteArray()
@@ -122,34 +140,61 @@ class UDPHolePunching(private val localPort: Int = 0) {
                 Log.d(TAG, "Sent initial hole punch packet")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to send initial hole punch packet: ${e.message}")
+                _connectionStatus.value = ConnectionStatus.FAILED
                 throw e
             }
             
+            // Stop any existing connection attempt thread
+            connectionAttemptThread?.interrupt()
+            
             // Start sending periodic packets to keep the hole open
-            Thread {
+            connectionAttemptThread = Thread {
                 var attempts = 0
                 val maxAttempts = 30 // Try for 30 seconds
                 
-                while (!isConnected && attempts < maxAttempts) {
+                while (!isConnected && attempts < maxAttempts && !Thread.currentThread().isInterrupted) {
                     try {
                         socket?.send(packet)
                         Log.d(TAG, "Sent hole punch packet (attempt ${attempts+1})")
                         Thread.sleep(1000) // Send every second
                         attempts++
                     } catch (e: Exception) {
-                        Log.e(TAG, "Error during hole punching: ${e.message}")
+                        if (!Thread.currentThread().isInterrupted) {
+                            Log.e(TAG, "Error during hole punching: ${e.message}")
+                            _connectionStatus.value = ConnectionStatus.FAILED
+                        }
                         break
                     }
                 }
                 
                 if (isConnected) {
                     Log.d(TAG, "Hole punching successful after $attempts attempts")
-                } else if (attempts >= maxAttempts) {
+                    _connectionStatus.value = ConnectionStatus.CONNECTED
+                    // Send a welcome message to let the peer know we're connected
+                    try {
+                        val welcomeMessage = "Connected successfully after $attempts attempts!"
+                        val welcomeData = welcomeMessage.toByteArray()
+                        val welcomePacket = DatagramPacket(welcomeData, welcomeData.size, this@UDPHolePunching.remoteAddress, this@UDPHolePunching.remotePort)
+                        socket?.send(welcomePacket)
+                        
+                        // Add to our own chat
+                        _messages.value = _messages.value + ChatMessage(
+                            text = welcomeMessage,
+                            isLocal = true
+                        )
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to send welcome message: ${e.message}")
+                    }
+                } else if (attempts >= maxAttempts && !Thread.currentThread().isInterrupted) {
                     Log.e(TAG, "Hole punching failed after $maxAttempts attempts")
+                    _connectionStatus.value = ConnectionStatus.FAILED
                 }
-            }.start()
+            }.apply {
+                start()
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Error starting hole punching: ${e.message}")
+            _connectionStatus.value = ConnectionStatus.FAILED
             e.printStackTrace()
             throw e
         }
@@ -189,9 +234,12 @@ class UDPHolePunching(private val localPort: Int = 0) {
 
     fun stop() {
         isListening = false
+        connectionAttemptThread?.interrupt()
+        connectionAttemptThread = null
         socket?.close()
         socket = null
         isConnected = false
+        _connectionStatus.value = ConnectionStatus.NOT_CONNECTED
         Log.d(TAG, "UDP hole punching stopped")
     }
 } 
