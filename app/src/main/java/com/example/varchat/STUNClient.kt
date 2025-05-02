@@ -75,10 +75,10 @@ class STUNClient {
 
             for (server in STUN_SERVERS) {
                 try {
-                    val (host, port) = server.split(":")
+                    val (host, serverPort) = server.split(":")
                     val address = InetAddress.getByName(host)
                     Log.d(TAG, "Sending STUN request to $server")
-                    val packet = DatagramPacket(request, request.size, address, port.toInt())
+                    val packet = DatagramPacket(request, request.size, address, serverPort.toInt())
                     socket.send(packet)
 
                     val response = ByteArray(1024)
