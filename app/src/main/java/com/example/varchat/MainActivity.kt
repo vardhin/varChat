@@ -23,6 +23,10 @@ import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.URL
 import java.net.HttpURLConnection
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
 
 class MainActivity : ComponentActivity() {
     private val udpHolePunching = UDPHolePunching()
@@ -58,10 +62,20 @@ fun UDPHolePunchingDemo(udpHolePunching: UDPHolePunching, stunClient: STUNClient
     var publicIP by remember { mutableStateOf("") }
     var publicPort by remember { mutableStateOf("") }
     var showChat by remember { mutableStateOf(false) }
+    var showLogs by remember { mutableStateOf(false) }
     var isLoading by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val messages by udpHolePunching.messages.collectAsState()
+    val logMessages by udpHolePunching.logMessages.collectAsState()
     val connectionStatus by udpHolePunching.connectionStatus.collectAsState()
+    val logListState = rememberLazyListState()
+
+    // Auto-scroll to bottom of logs when new entries appear
+    LaunchedEffect(logMessages.size) {
+        if (logMessages.isNotEmpty()) {
+            logListState.animateScrollToItem(logMessages.size - 1)
+        }
+    }
 
     LaunchedEffect(connectionStatus) {
         when (connectionStatus) {
@@ -71,6 +85,8 @@ fun UDPHolePunchingDemo(udpHolePunching: UDPHolePunching, stunClient: STUNClient
             }
             UDPHolePunching.ConnectionStatus.ATTEMPTING -> {
                 status = "Attempting connection to ${remoteAddress}:${remotePort}..."
+                // Optionally, auto-show logs when attempting connection
+                showLogs = true
             }
             UDPHolePunching.ConnectionStatus.FAILED -> {
                 status = "Connection failed! Please try again."
@@ -92,7 +108,13 @@ fun UDPHolePunchingDemo(udpHolePunching: UDPHolePunching, stunClient: STUNClient
             },
             onBack = { 
                 showChat = false 
-            }
+            },
+            onShowLogs = {
+                showLogs = !showLogs
+            },
+            showLogs = showLogs,
+            logMessages = logMessages,
+            logListState = logListState
         )
     } else {
         Column(
@@ -220,6 +242,56 @@ fun UDPHolePunchingDemo(udpHolePunching: UDPHolePunching, stunClient: STUNClient
                     modifier = Modifier.padding(16.dp)
                 )
             }
+            
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                TextButton(
+                    onClick = { showLogs = !showLogs }
+                ) {
+                    Text(if (showLogs) "Hide Logs" else "Show Logs")
+                }
+            }
+            
+            if (showLogs) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(8.dp)
+                    ) {
+                        Text("Hole Punching Logs", style = MaterialTheme.typography.titleMedium)
+                        
+                        Spacer(modifier = Modifier.height(8.dp))
+                        
+                        LazyColumn(
+                            state = logListState,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f)
+                                .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
+                                .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.8f))
+                                .padding(8.dp)
+                        ) {
+                            items(logMessages) { logMessage ->
+                                Text(
+                                    text = logMessage,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontFamily = FontFamily.Monospace,
+                                    modifier = Modifier.padding(vertical = 2.dp),
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -270,7 +342,11 @@ fun ChatScreen(
     messages: List<UDPHolePunching.ChatMessage>,
     connectionStatus: UDPHolePunching.ConnectionStatus,
     onSendMessage: (String) -> Unit,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onShowLogs: () -> Unit,
+    showLogs: Boolean,
+    logMessages: List<String>,
+    logListState: LazyListState
 ) {
     var message by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
@@ -326,8 +402,52 @@ fun ChatScreen(
                 )
             }
             
-            Button(onClick = onBack) {
-                Text("Back")
+            Row {
+                TextButton(onClick = onShowLogs) {
+                    Text(if (showLogs) "Hide Logs" else "Show Logs")
+                }
+                
+                Button(onClick = onBack) {
+                    Text("Back")
+                }
+            }
+        }
+        
+        if (showLogs) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(200.dp)
+                    .padding(vertical = 8.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(8.dp)
+                ) {
+                    Text("Connection Logs", style = MaterialTheme.typography.titleSmall)
+                    
+                    LazyColumn(
+                        state = logListState,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f)
+                            .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
+                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                            .padding(4.dp)
+                    ) {
+                        items(logMessages) { logMessage ->
+                            Text(
+                                text = logMessage,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace,
+                                modifier = Modifier.padding(vertical = 1.dp),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
             }
         }
 

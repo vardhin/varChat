@@ -8,21 +8,26 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicBoolean
 
 class UDPHolePunching(private val localPort: Int = 0) {
     private var socket: DatagramSocket? = null
     private val TAG = "UDPHolePunching"
-    private var isConnected = false
+    private var isConnected = AtomicBoolean(false)
     private var remoteAddress: InetAddress? = null
     private var remotePort: Int = 0
-    private var isListening = false
+    private var isListening = AtomicBoolean(false)
     private var connectionAttemptThread: Thread? = null
+    private var keepAliveThread: Thread? = null
 
     private val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
     val messages: StateFlow<List<ChatMessage>> = _messages
     
     private val _connectionStatus = MutableStateFlow<ConnectionStatus>(ConnectionStatus.NOT_CONNECTED)
     val connectionStatus: StateFlow<ConnectionStatus> = _connectionStatus
+    
+    private val _logMessages = MutableStateFlow<List<String>>(emptyList())
+    val logMessages: StateFlow<List<String>> = _logMessages
 
     enum class ConnectionStatus {
         NOT_CONNECTED,
@@ -37,80 +42,137 @@ class UDPHolePunching(private val localPort: Int = 0) {
         val timestamp: Long = System.currentTimeMillis()
     )
 
+    private fun addLogMessage(message: String) {
+        val timestamp = System.currentTimeMillis()
+        val formattedTime = java.text.SimpleDateFormat("HH:mm:ss.SSS").format(java.util.Date(timestamp))
+        val logMessage = "[$formattedTime] $message"
+        Log.d(TAG, logMessage)
+        
+        // Keep only the last 100 messages
+        val updatedLogs = _logMessages.value + logMessage
+        if (updatedLogs.size > 100) {
+            _logMessages.value = updatedLogs.takeLast(100)
+        } else {
+            _logMessages.value = updatedLogs
+        }
+    }
+
     suspend fun start() = withContext(Dispatchers.IO) {
         if (socket != null) {
-            Log.d(TAG, "Socket already exists, reusing socket on port: ${socket?.localPort}")
+            addLogMessage("Socket already exists on port: ${socket?.localPort}")
             return@withContext
         }
         
         try {
             socket = DatagramSocket(localPort)
-            Log.d(TAG, "Socket created on port: ${socket?.localPort}")
+            addLogMessage("Socket created on port: ${socket?.localPort}")
             startListening()
         } catch (e: Exception) {
-            Log.e(TAG, "Error creating socket: ${e.message}")
+            addLogMessage("Error creating socket: ${e.message}")
             e.printStackTrace()
         }
     }
 
     private fun startListening() {
-        if (isListening) {
-            Log.d(TAG, "Already listening, ignoring duplicate call")
+        if (isListening.get()) {
+            addLogMessage("Already listening, ignoring duplicate call")
             return
         }
         
-        isListening = true
+        isListening.set(true)
         Thread {
             try {
                 val buffer = ByteArray(1024)
                 val packet = DatagramPacket(buffer, buffer.size)
                 
-                while (isListening && socket != null) {
+                addLogMessage("Started listening for incoming packets")
+                
+                while (isListening.get() && socket != null) {
                     try {
                         socket?.receive(packet)
                         val message = String(packet.data, 0, packet.length)
-                        Log.d(TAG, "Received packet from ${packet.address}:${packet.port}, length: ${packet.length}")
+                        addLogMessage("Received packet from ${packet.address}:${packet.port}, length: ${packet.length}")
                         
-                        if (!isConnected) {
+                        if (!isConnected.get()) {
                             // First message received, establish connection
                             remoteAddress = packet.address
                             remotePort = packet.port
-                            isConnected = true
+                            isConnected.set(true)
                             _connectionStatus.value = ConnectionStatus.CONNECTED
-                            Log.d(TAG, "Connection established with ${packet.address}:${packet.port}")
+                            addLogMessage("Connection established with ${packet.address}:${packet.port}")
+                            
+                            // Start keep-alive thread when connection is established
+                            startKeepAliveThread()
                         }
                         
-                        if (message != "HOLE_PUNCH") {
+                        if (message != "HOLE_PUNCH" && message != "KEEP_ALIVE") {
                             _messages.value = _messages.value + ChatMessage(
                                 text = message,
                                 isLocal = false
                             )
-                        } else {
-                            Log.d(TAG, "Received hole punching packet, not displaying in chat")
+                            addLogMessage("Added message to chat: $message")
+                        } else if (message == "HOLE_PUNCH") {
+                            addLogMessage("Received hole punching packet")
                             // Send a reply to keep the hole open
                             try {
                                 val replyPacket = DatagramPacket("HOLE_PUNCH".toByteArray(), "HOLE_PUNCH".length, packet.address, packet.port)
                                 socket?.send(replyPacket)
-                                Log.d(TAG, "Sent hole punch reply to ${packet.address}:${packet.port}")
+                                addLogMessage("Sent hole punch reply")
                             } catch (e: Exception) {
-                                Log.e(TAG, "Failed to send hole punch reply: ${e.message}")
+                                addLogMessage("Failed to send hole punch reply: ${e.message}")
                             }
+                        } else if (message == "KEEP_ALIVE") {
+                            addLogMessage("Received keep-alive packet")
+                            // No need to respond to keep-alive packets
                         }
                     } catch (e: Exception) {
-                        if (isListening) {
-                            Log.e(TAG, "Error receiving packet: ${e.message}")
+                        if (isListening.get()) {
+                            addLogMessage("Error receiving packet: ${e.message}")
                         } else {
                             // Socket likely closed, breaking out of loop
                             break
                         }
                     }
                 }
-                Log.d(TAG, "Listening thread ended")
+                addLogMessage("Listening thread ended")
             } catch (e: Exception) {
-                Log.e(TAG, "Error in listening thread: ${e.message}")
+                addLogMessage("Error in listening thread: ${e.message}")
                 e.printStackTrace()
             }
         }.start()
+    }
+    
+    private fun startKeepAliveThread() {
+        if (keepAliveThread != null && keepAliveThread?.isAlive == true) {
+            addLogMessage("Keep-alive thread already running")
+            return
+        }
+        
+        keepAliveThread = Thread {
+            addLogMessage("Started keep-alive thread")
+            while (isConnected.get() && !Thread.currentThread().isInterrupted && socket != null && remoteAddress != null) {
+                try {
+                    val keepAliveData = "KEEP_ALIVE".toByteArray()
+                    val packet = DatagramPacket(keepAliveData, keepAliveData.size, remoteAddress, remotePort)
+                    socket?.send(packet)
+                    addLogMessage("Sent keep-alive packet")
+                    Thread.sleep(15000) // Send keep-alive every 15 seconds
+                } catch (e: InterruptedException) {
+                    addLogMessage("Keep-alive thread interrupted")
+                    break
+                } catch (e: Exception) {
+                    addLogMessage("Error sending keep-alive: ${e.message}")
+                    if (socket == null || !isConnected.get()) {
+                        break
+                    }
+                    Thread.sleep(5000) // On error, retry after 5 seconds
+                }
+            }
+            addLogMessage("Keep-alive thread ended")
+        }.apply {
+            isDaemon = true
+            start()
+        }
     }
 
     suspend fun startHolePunching(remoteIP: String, remotePort: Int) = withContext(Dispatchers.IO) {
@@ -122,13 +184,14 @@ class UDPHolePunching(private val localPort: Int = 0) {
             
             // Reset state if retrying
             if (connectionStatus.value == ConnectionStatus.FAILED || connectionStatus.value == ConnectionStatus.CONNECTED) {
-                isConnected = false
+                isConnected.set(false)
+                addLogMessage("Resetting connection state for new hole punching attempt")
             }
             
             this@UDPHolePunching.remoteAddress = InetAddress.getByName(remoteIP)
             this@UDPHolePunching.remotePort = remotePort
             
-            Log.d(TAG, "Starting hole punching to $remoteIP:$remotePort")
+            addLogMessage("Starting hole punching to $remoteIP:$remotePort")
             _connectionStatus.value = ConnectionStatus.ATTEMPTING
             
             // Send initial packet to create NAT mapping
@@ -137,9 +200,9 @@ class UDPHolePunching(private val localPort: Int = 0) {
             
             try {
                 socket?.send(packet)
-                Log.d(TAG, "Sent initial hole punch packet")
+                addLogMessage("Sent initial hole punch packet")
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to send initial hole punch packet: ${e.message}")
+                addLogMessage("Failed to send initial hole punch packet: ${e.message}")
                 _connectionStatus.value = ConnectionStatus.FAILED
                 throw e
             }
@@ -150,25 +213,49 @@ class UDPHolePunching(private val localPort: Int = 0) {
             // Start sending periodic packets to keep the hole open
             connectionAttemptThread = Thread {
                 var attempts = 0
-                val maxAttempts = 30 // Try for 30 seconds
+                val maxAttempts = 60 // Try for 60 seconds
+                val initialBackoff = 200L // Start with 200ms
+                var currentBackoff = initialBackoff
                 
-                while (!isConnected && attempts < maxAttempts && !Thread.currentThread().isInterrupted) {
+                addLogMessage("Started connection attempt thread")
+                
+                while (!isConnected.get() && attempts < maxAttempts && !Thread.currentThread().isInterrupted) {
                     try {
                         socket?.send(packet)
-                        Log.d(TAG, "Sent hole punch packet (attempt ${attempts+1})")
-                        Thread.sleep(1000) // Send every second
                         attempts++
+                        
+                        // Log less frequently as attempts increase
+                        if (attempts % 5 == 0 || attempts < 5) {
+                            addLogMessage("Sent hole punch packet (attempt $attempts/$maxAttempts)")
+                        }
+                        
+                        Thread.sleep(currentBackoff)
+                        
+                        // Adaptive timing - gradually increase delay between packets
+                        if (attempts < 10) {
+                            // Rapid punching at start (200-500ms)
+                            currentBackoff = initialBackoff + (attempts * 30)
+                        } else if (attempts < 20) {
+                            // Medium pace (0.5s - 1s)
+                            currentBackoff = 500L + ((attempts - 10) * 50)
+                        } else {
+                            // Slower pace for remaining attempts (1s - 2s)
+                            currentBackoff = 1000L + ((attempts - 20) * 50).coerceAtMost(1000)
+                        }
+                    } catch (e: InterruptedException) {
+                        addLogMessage("Connection attempt thread interrupted")
+                        break
                     } catch (e: Exception) {
                         if (!Thread.currentThread().isInterrupted) {
-                            Log.e(TAG, "Error during hole punching: ${e.message}")
+                            addLogMessage("Error during hole punching: ${e.message}")
                             _connectionStatus.value = ConnectionStatus.FAILED
                         }
                         break
                     }
                 }
                 
-                if (isConnected) {
-                    Log.d(TAG, "Hole punching successful after $attempts attempts")
+                if (isConnected.get()) {
+                    addLogMessage("Hole punching successful after $attempts attempts")
                     _connectionStatus.value = ConnectionStatus.CONNECTED
                     // Send a welcome message to let the peer know we're connected
                     try {
@@ -182,18 +269,20 @@ class UDPHolePunching(private val localPort: Int = 0) {
                             text = welcomeMessage,
                             isLocal = true
                         )
+                        addLogMessage("Sent welcome message")
                     } catch (e: Exception) {
-                        Log.e(TAG, "Failed to send welcome message: ${e.message}")
+                        addLogMessage("Failed to send welcome message: ${e.message}")
                     }
                 } else if (attempts >= maxAttempts && !Thread.currentThread().isInterrupted) {
-                    Log.e(TAG, "Hole punching failed after $maxAttempts attempts")
+                    addLogMessage("Hole punching failed after $maxAttempts attempts")
                     _connectionStatus.value = ConnectionStatus.FAILED
                 }
             }.apply {
+                isDaemon = true
                 start()
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error starting hole punching: ${e.message}")
+            addLogMessage("Error starting hole punching: ${e.message}")
             _connectionStatus.value = ConnectionStatus.FAILED
             e.printStackTrace()
             throw e
@@ -202,7 +291,8 @@ class UDPHolePunching(private val localPort: Int = 0) {
 
     suspend fun sendMessage(message: String) = withContext(Dispatchers.IO) {
         try {
-            if (!isConnected) {
+            if (!isConnected.get()) {
+                addLogMessage("Cannot send message: not connected to remote peer")
                 throw Exception("Not connected to remote peer")
             }
             
@@ -211,9 +301,9 @@ class UDPHolePunching(private val localPort: Int = 0) {
             
             try {
                 socket?.send(packet)
-                Log.d(TAG, "Sent message to $remoteAddress:$remotePort: $message")
+                addLogMessage("Sent message: $message")
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to send message: ${e.message}")
+                addLogMessage("Failed to send message: ${e.message}")
                 throw e
             }
             
@@ -222,7 +312,7 @@ class UDPHolePunching(private val localPort: Int = 0) {
                 isLocal = true
             )
         } catch (e: Exception) {
-            Log.e(TAG, "Error sending message: ${e.message}")
+            addLogMessage("Error sending message: ${e.message}")
             e.printStackTrace()
             throw e
         }
@@ -233,13 +323,15 @@ class UDPHolePunching(private val localPort: Int = 0) {
     }
 
     fun stop() {
-        isListening = false
+        isListening.set(false)
+        isConnected.set(false)
         connectionAttemptThread?.interrupt()
         connectionAttemptThread = null
+        keepAliveThread?.interrupt()
+        keepAliveThread = null
         socket?.close()
         socket = null
-        isConnected = false
         _connectionStatus.value = ConnectionStatus.NOT_CONNECTED
-        Log.d(TAG, "UDP hole punching stopped")
+        addLogMessage("UDP hole punching stopped")
     }
 } 
