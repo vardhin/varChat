@@ -28,22 +28,54 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import androidx.lifecycle.lifecycleScope
 
 class MainActivity : ComponentActivity() {
     private val udpHolePunching = UDPHolePunching()
     private val stunClient = STUNClient()
     private val TAG = "MainActivity"
 
+    // Combined log messages
+    private val _combinedLogMessages = MutableStateFlow<List<String>>(emptyList())
+    val combinedLogMessages: StateFlow<List<String>> = _combinedLogMessages
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        // Collect UDPHolePunching logs
+        lifecycleScope.launch {
+            launch {
+                udpHolePunching.logMessages.collect { messages ->
+                    val currentLogs = _combinedLogMessages.value
+                    val newMessages = messages.filter { !currentLogs.contains(it) }
+                    if (newMessages.isNotEmpty()) {
+                        _combinedLogMessages.value = (_combinedLogMessages.value + newMessages).takeLast(200)
+                    }
+                }
+            }
+            
+            // Collect STUN client logs
+            launch {
+                stunClient.logMessages.collect { messages ->
+                    val currentLogs = _combinedLogMessages.value
+                    val newMessages = messages.filter { !currentLogs.contains(it) }
+                    if (newMessages.isNotEmpty()) {
+                        _combinedLogMessages.value = (_combinedLogMessages.value + newMessages).takeLast(200)
+                    }
+                }
+            }
+        }
+
         setContent {
             VarChatTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    UDPHolePunchingDemo(udpHolePunching, stunClient)
+                    UDPHolePunchingDemo(udpHolePunching, stunClient, combinedLogMessages)
                 }
             }
         }
@@ -56,7 +88,11 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun UDPHolePunchingDemo(udpHolePunching: UDPHolePunching, stunClient: STUNClient) {
+fun UDPHolePunchingDemo(
+    udpHolePunching: UDPHolePunching, 
+    stunClient: STUNClient,
+    combinedLogs: StateFlow<List<String>>
+) {
     var remoteAddress by remember { mutableStateOf("") }
     var remotePort by remember { mutableStateOf("") }
     var status by remember { mutableStateOf("Not started") }
@@ -67,7 +103,7 @@ fun UDPHolePunchingDemo(udpHolePunching: UDPHolePunching, stunClient: STUNClient
     var isLoading by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val messages by udpHolePunching.messages.collectAsState()
-    val logMessages by udpHolePunching.logMessages.collectAsState()
+    val logMessages by combinedLogs.collectAsState()
     val connectionStatus by udpHolePunching.connectionStatus.collectAsState()
     val logListState = rememberLazyListState()
 
@@ -280,10 +316,21 @@ fun UDPHolePunchingDemo(udpHolePunching: UDPHolePunching, stunClient: STUNClient
                                 .padding(8.dp)
                         ) {
                             items(logMessages) { logMessage ->
+                                val isStunLog = logMessage.contains("STUN")
+                                val isHolePunchLog = logMessage.contains("hole punch", ignoreCase = true)
+                                val textColor = when {
+                                    isStunLog -> Color(0xFF2196F3) // Blue for STUN
+                                    isHolePunchLog -> Color(0xFF9C27B0) // Purple for hole punching
+                                    logMessage.contains("ERROR", ignoreCase = true) -> Color(0xFFF44336) // Red for errors
+                                    logMessage.contains("Connected successfully") -> Color(0xFF4CAF50) // Green for success
+                                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                }
+                                
                                 Text(
                                     text = logMessage,
                                     style = MaterialTheme.typography.bodySmall,
                                     fontFamily = FontFamily.Monospace,
+                                    color = textColor,
                                     modifier = Modifier.padding(vertical = 2.dp),
                                     maxLines = 2,
                                     overflow = TextOverflow.Ellipsis
@@ -426,7 +473,7 @@ fun ChatScreen(
                         .fillMaxSize()
                         .padding(8.dp)
                 ) {
-                    Text("Connection Logs", style = MaterialTheme.typography.titleSmall)
+                    Text("Connection & STUN Logs", style = MaterialTheme.typography.titleSmall)
                     
                     LazyColumn(
                         state = logListState,
@@ -438,10 +485,21 @@ fun ChatScreen(
                             .padding(4.dp)
                     ) {
                         items(logMessages) { logMessage ->
+                            val isStunLog = logMessage.contains("STUN")
+                            val isHolePunchLog = logMessage.contains("hole punch", ignoreCase = true)
+                            val textColor = when {
+                                isStunLog -> Color(0xFF2196F3) // Blue for STUN
+                                isHolePunchLog -> Color(0xFF9C27B0) // Purple for hole punching
+                                logMessage.contains("ERROR", ignoreCase = true) -> Color(0xFFF44336) // Red for errors
+                                logMessage.contains("Connected successfully") -> Color(0xFF4CAF50) // Green for success
+                                else -> MaterialTheme.colorScheme.onSurfaceVariant
+                            }
+                            
                             Text(
                                 text = logMessage,
                                 style = MaterialTheme.typography.bodySmall,
                                 fontFamily = FontFamily.Monospace,
+                                color = textColor,
                                 modifier = Modifier.padding(vertical = 1.dp),
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
