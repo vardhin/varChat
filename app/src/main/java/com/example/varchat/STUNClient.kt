@@ -182,7 +182,7 @@ class STUNClient {
                         
                         // Move to next attribute (attributes are padded to 4 bytes)
                         // Using the padding calculation from RFC 5389
-                        val paddedLength = (attrLength + 3) and (~3); // Round up to multiple of 4
+                        val paddedLength = (attrLength + 3) and (0xFFFFFFFC); // Round up to multiple of 4
                         offset += 4 + paddedLength;
                     }
 
