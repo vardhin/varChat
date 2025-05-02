@@ -248,6 +248,23 @@ class SignalingClient(
                             addLogMessage("STUN response shows public endpoint: $ip:$port")
                             return@withContext Pair(ip, port)
                         }
+                    }
+                } catch (e: Exception) {
+                    addLogMessage("Error parsing STUN response: ${e.message}")
+                }
+            } catch (e: java.net.SocketTimeoutException) {
+                addLogMessage("Timeout waiting for STUN response")
+            } catch (e: Exception) {
+                addLogMessage("Error receiving STUN response: ${e.message}")
+            }
+            
+            null
+        } catch (e: Exception) {
+            addLogMessage("Error in STUN request: ${e.message}")
+            null
+        }
+    }
+    
     fun requestConnection(targetPeerId: String) {
         if (!isConnected.get()) {
             addLogMessage("Cannot request connection: not connected to signaling server")
