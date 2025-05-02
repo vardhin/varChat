@@ -29,10 +29,10 @@ class STUNClient {
 
             // STUN binding request
             val request = byteArrayOf(
-                0x00, 0x01, // Message Type: Binding Request
-                0x00, 0x00, // Message Length
-                0x21, 0x12, 0xA4, 0x42, // Magic Cookie
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 // Transaction ID
+                0x00.toByte(), 0x01.toByte(), // Message Type: Binding Request
+                0x00.toByte(), 0x00.toByte(), // Message Length
+                0x21.toByte(), 0x12.toByte(), 0xA4.toByte(), 0x42.toByte(), // Magic Cookie
+                0x00.toByte(), 0x00.toByte(), 0x00.toByte(), 0x00.toByte(), 0x00.toByte(), 0x00.toByte(), 0x00.toByte(), 0x00.toByte(), 0x00.toByte(), 0x00.toByte(), 0x00.toByte(), 0x00.toByte() // Transaction ID
             )
 
             for (server in STUN_SERVERS) {
