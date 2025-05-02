@@ -15,6 +15,7 @@ class UDPHolePunching(private val localPort: Int = 0) {
     private var isConnected = false
     private var remoteAddress: InetAddress? = null
     private var remotePort: Int = 0
+    private var isListening = false
 
     private val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
     val messages: StateFlow<List<ChatMessage>> = _messages
@@ -26,67 +27,131 @@ class UDPHolePunching(private val localPort: Int = 0) {
     )
 
     suspend fun start() = withContext(Dispatchers.IO) {
+        if (socket != null) {
+            Log.d(TAG, "Socket already exists, reusing socket on port: ${socket?.localPort}")
+            return@withContext
+        }
+        
         try {
             socket = DatagramSocket(localPort)
             Log.d(TAG, "Socket created on port: ${socket?.localPort}")
             startListening()
         } catch (e: Exception) {
             Log.e(TAG, "Error creating socket: ${e.message}")
+            e.printStackTrace()
         }
     }
 
     private fun startListening() {
+        if (isListening) {
+            Log.d(TAG, "Already listening, ignoring duplicate call")
+            return
+        }
+        
+        isListening = true
         Thread {
             try {
                 val buffer = ByteArray(1024)
                 val packet = DatagramPacket(buffer, buffer.size)
                 
-                while (true) {
-                    socket?.receive(packet)
-                    val message = String(packet.data, 0, packet.length)
-                    
-                    if (!isConnected) {
-                        // First message received, establish connection
-                        remoteAddress = packet.address
-                        remotePort = packet.port
-                        isConnected = true
-                        Log.d(TAG, "Connection established with ${packet.address}:${packet.port}")
+                while (isListening && socket != null) {
+                    try {
+                        socket?.receive(packet)
+                        val message = String(packet.data, 0, packet.length)
+                        Log.d(TAG, "Received packet from ${packet.address}:${packet.port}, length: ${packet.length}")
+                        
+                        if (!isConnected) {
+                            // First message received, establish connection
+                            remoteAddress = packet.address
+                            remotePort = packet.port
+                            isConnected = true
+                            Log.d(TAG, "Connection established with ${packet.address}:${packet.port}")
+                        }
+                        
+                        if (message != "HOLE_PUNCH") {
+                            _messages.value = _messages.value + ChatMessage(
+                                text = message,
+                                isLocal = false
+                            )
+                        } else {
+                            Log.d(TAG, "Received hole punching packet, not displaying in chat")
+                            // Send a reply to keep the hole open
+                            try {
+                                val replyPacket = DatagramPacket("HOLE_PUNCH".toByteArray(), "HOLE_PUNCH".length, packet.address, packet.port)
+                                socket?.send(replyPacket)
+                                Log.d(TAG, "Sent hole punch reply to ${packet.address}:${packet.port}")
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Failed to send hole punch reply: ${e.message}")
+                            }
+                        }
+                    } catch (e: Exception) {
+                        if (isListening) {
+                            Log.e(TAG, "Error receiving packet: ${e.message}")
+                        } else {
+                            // Socket likely closed, breaking out of loop
+                            break
+                        }
                     }
-                    
-                    _messages.value = _messages.value + ChatMessage(
-                        text = message,
-                        isLocal = false
-                    )
                 }
+                Log.d(TAG, "Listening thread ended")
             } catch (e: Exception) {
-                Log.e(TAG, "Error receiving packet: ${e.message}")
+                Log.e(TAG, "Error in listening thread: ${e.message}")
+                e.printStackTrace()
             }
         }.start()
     }
 
     suspend fun startHolePunching(remoteIP: String, remotePort: Int) = withContext(Dispatchers.IO) {
         try {
-            remoteAddress = InetAddress.getByName(remoteIP)
+            // Make sure the socket is created first
+            if (socket == null) {
+                start()
+            }
+            
+            this@UDPHolePunching.remoteAddress = InetAddress.getByName(remoteIP)
             this@UDPHolePunching.remotePort = remotePort
+            
+            Log.d(TAG, "Starting hole punching to $remoteIP:$remotePort")
             
             // Send initial packet to create NAT mapping
             val initialPacket = "HOLE_PUNCH".toByteArray()
-            val packet = DatagramPacket(initialPacket, initialPacket.size, remoteAddress, remotePort)
-            socket?.send(packet)
+            val packet = DatagramPacket(initialPacket, initialPacket.size, this@UDPHolePunching.remoteAddress, remotePort)
+            
+            try {
+                socket?.send(packet)
+                Log.d(TAG, "Sent initial hole punch packet")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to send initial hole punch packet: ${e.message}")
+                throw e
+            }
             
             // Start sending periodic packets to keep the hole open
             Thread {
-                while (!isConnected) {
+                var attempts = 0
+                val maxAttempts = 30 // Try for 30 seconds
+                
+                while (!isConnected && attempts < maxAttempts) {
                     try {
                         socket?.send(packet)
+                        Log.d(TAG, "Sent hole punch packet (attempt ${attempts+1})")
                         Thread.sleep(1000) // Send every second
+                        attempts++
                     } catch (e: Exception) {
                         Log.e(TAG, "Error during hole punching: ${e.message}")
+                        break
                     }
+                }
+                
+                if (isConnected) {
+                    Log.d(TAG, "Hole punching successful after $attempts attempts")
+                } else if (attempts >= maxAttempts) {
+                    Log.e(TAG, "Hole punching failed after $maxAttempts attempts")
                 }
             }.start()
         } catch (e: Exception) {
             Log.e(TAG, "Error starting hole punching: ${e.message}")
+            e.printStackTrace()
+            throw e
         }
     }
 
@@ -98,7 +163,14 @@ class UDPHolePunching(private val localPort: Int = 0) {
             
             val data = message.toByteArray()
             val packet = DatagramPacket(data, data.size, remoteAddress, remotePort)
-            socket?.send(packet)
+            
+            try {
+                socket?.send(packet)
+                Log.d(TAG, "Sent message to $remoteAddress:$remotePort: $message")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to send message: ${e.message}")
+                throw e
+            }
             
             _messages.value = _messages.value + ChatMessage(
                 text = message,
@@ -106,6 +178,8 @@ class UDPHolePunching(private val localPort: Int = 0) {
             )
         } catch (e: Exception) {
             Log.e(TAG, "Error sending message: ${e.message}")
+            e.printStackTrace()
+            throw e
         }
     }
 
@@ -114,8 +188,10 @@ class UDPHolePunching(private val localPort: Int = 0) {
     }
 
     fun stop() {
+        isListening = false
         socket?.close()
         socket = null
         isConnected = false
+        Log.d(TAG, "UDP hole punching stopped")
     }
 } 

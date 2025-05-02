@@ -14,10 +14,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import com.example.varchat.ui.theme.VarChatTheme
+import android.util.Log
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.net.URL
+import java.net.HttpURLConnection
 
 class MainActivity : ComponentActivity() {
     private val udpHolePunching = UDPHolePunching()
     private val stunClient = STUNClient()
+    private val TAG = "MainActivity"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -48,6 +56,7 @@ fun UDPHolePunchingDemo(udpHolePunching: UDPHolePunching, stunClient: STUNClient
     var publicIP by remember { mutableStateOf("") }
     var publicPort by remember { mutableStateOf("") }
     var showChat by remember { mutableStateOf(false) }
+    var isLoading by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val messages by udpHolePunching.messages.collectAsState()
 
@@ -71,22 +80,50 @@ fun UDPHolePunchingDemo(udpHolePunching: UDPHolePunching, stunClient: STUNClient
         ) {
             Text("UDP Hole Punching Demo", style = MaterialTheme.typography.headlineMedium)
             
-            Button(
-                onClick = {
-                    scope.launch {
-                        val stunResponse = stunClient.getPublicAddress()
-                        if (stunResponse != null) {
-                            publicIP = stunResponse.publicIP
-                            publicPort = stunResponse.publicPort.toString()
-                            status = "Public IP: $publicIP, Public Port: $publicPort"
-                            udpHolePunching.start()
-                        } else {
-                            status = "Failed to get public address"
+            if (isLoading) {
+                CircularProgressIndicator()
+                Text("Attempting to get public address...", style = MaterialTheme.typography.bodyMedium)
+            } else {
+                Button(
+                    onClick = {
+                        scope.launch {
+                            isLoading = true
+                            try {
+                                // Attempt STUN first
+                                val stunResponse = stunClient.getPublicAddress()
+                                if (stunResponse != null) {
+                                    publicIP = stunResponse.publicIP
+                                    publicPort = stunResponse.publicPort.toString()
+                                    status = "Public IP: $publicIP, Public Port: $publicPort"
+                                    udpHolePunching.start()
+                                } else {
+                                    // STUN failed, try IP API fallback
+                                    val ipInfo = getPublicIPFallback()
+                                    if (ipInfo != null) {
+                                        publicIP = ipInfo.first
+                                        val localPort = udpHolePunching.getLocalPort()
+                                        publicPort = if (localPort > 0) localPort.toString() else ""
+                                        
+                                        if (publicIP.isNotEmpty()) {
+                                            status = "Got public IP (API): $publicIP, Using local port: $publicPort"
+                                            udpHolePunching.start()
+                                        } else {
+                                            status = "Failed to get public address"
+                                        }
+                                    } else {
+                                        status = "Failed to get public address"
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                status = "Error: ${e.message}"
+                            } finally {
+                                isLoading = false
+                            }
                         }
                     }
+                ) {
+                    Text("Get Public Address")
                 }
-            ) {
-                Text("Get Public Address")
             }
 
             Text("Your Public Address: $publicIP:$publicPort")
@@ -116,7 +153,8 @@ fun UDPHolePunchingDemo(udpHolePunching: UDPHolePunching, stunClient: STUNClient
                             status = "Error: ${e.message}"
                         }
                     }
-                }
+                },
+                enabled = publicIP.isNotEmpty() && publicPort.isNotEmpty() && remoteAddress.isNotEmpty() && remotePort.isNotEmpty()
             ) {
                 Text("Start Hole Punching")
             }
@@ -124,6 +162,47 @@ fun UDPHolePunchingDemo(udpHolePunching: UDPHolePunching, stunClient: STUNClient
             Text(status, style = MaterialTheme.typography.bodyMedium)
         }
     }
+}
+
+/**
+ * Fallback method to get public IP address using a public API
+ */
+suspend fun getPublicIPFallback(): Pair<String, String>? = withContext(Dispatchers.IO) {
+    val urls = listOf(
+        "https://api.ipify.org",
+        "https://ifconfig.me/ip",
+        "https://icanhazip.com",
+        "https://checkip.amazonaws.com"
+    )
+    
+    for (urlStr in urls) {
+        try {
+            val url = URL(urlStr)
+            val connection = url.openConnection() as HttpURLConnection
+            connection.connectTimeout = 5000
+            connection.readTimeout = 5000
+            connection.setRequestProperty("User-Agent", "Mozilla/5.0")
+            
+            val responseCode = connection.responseCode
+            if (responseCode == 200) {
+                val reader = BufferedReader(InputStreamReader(connection.inputStream))
+                val ip = reader.readLine().trim()
+                reader.close()
+                
+                if (ip.isNotEmpty()) {
+                    Log.d("PublicIPFallback", "Got public IP from $urlStr: $ip")
+                    return@withContext Pair(ip, "")
+                }
+            } else {
+                Log.e("PublicIPFallback", "Failed to get IP from $urlStr, response code: $responseCode")
+            }
+        } catch (e: Exception) {
+            Log.e("PublicIPFallback", "Error with $urlStr: ${e.message}")
+        }
+    }
+    
+    Log.e("PublicIPFallback", "All API fallbacks failed")
+    null
 }
 
 @Composable
